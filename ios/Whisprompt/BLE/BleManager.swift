@@ -3,21 +3,17 @@ import CoreBluetooth
 import Combine
 
 /// Подключение к очкам Even Realities **G2** по CoreBluetooth (аналог Android BleService).
-/// Фаза 2a: скан → подключение обеих дужек → нотификации → авторизация (7 пакетов) → READY,
+/// Скан → подключение обеих дужек → нотификации → авторизация (7 пакетов) → READY,
 /// очередь отправки с ВРЕМЕННЫМ пейсингом (write-without-response в 0x5401), парсинг событий
-/// тачбара (0xE0-01 / 0x06-01) и показ текста через EvenHub-контейнеры.
-///
-/// Байтовую сборку целиком берёт `EvenG2Protocol`. Плавная авто-прокрутка/меню — Фаза 2b.
+/// тачбара (0xE0-01) и показ текста через EvenHub-контейнеры. Байтовую сборку берёт `EvenG2Protocol`.
 final class BleManager: NSObject, ObservableObject {
 
     static let shared = BleManager()
 
-    // Кастомный сервис Even G2: запись 0x5401, нотификации 0x5402, плюс NUS-жесты.
     private let CHAR_WRITE  = CBUUID(string: "00002760-08c2-11e1-9073-0e8ac72e5401")
     private let CHAR_NOTIFY = CBUUID(string: "00002760-08c2-11e1-9073-0e8ac72e5402")
     private let NUS_RX      = CBUUID(string: "6e400003-b5a3-f393-e0a9-e50e24dcca9e")
 
-    // Счётчики контента продолжаются после авторизации (как в референсе: seq 0x08 / msg 0x14).
     private let CONTENT_SEQ_START = 0x08
     private let CONTENT_MSG_START = 0x14
 
@@ -26,6 +22,8 @@ final class BleManager: NSObject, ObservableObject {
     @Published private(set) var status: String = "Отключено"
     @Published private(set) var isReady = false
     @Published private(set) var isScanning = false
+    @Published private(set) var lines: [String] = []   // весь текущий текст, разбитый на строки
+    @Published private(set) var top = 0                // верхняя видимая строка окна
 
     /// События с очков: "connected"/"disconnected"/"tap"/"prev"/"next"/"exit"/"reexit"/"narrow"/"wide".
     let events = PassthroughSubject<String, Never>()
@@ -36,8 +34,8 @@ final class BleManager: NSObject, ObservableObject {
     private var leftPeripheral: CBPeripheral?
     private var rightPeripheral: CBPeripheral?
     private var leftWrite: CBCharacteristic?
-    private var lReady = false          // левая: нотификации включены
-    private var rReady = false          // правая: нотификации включены (или её нет)
+    private var lReady = false
+    private var rReady = false
     private var authStarted = false
     private var authDone = false
     private var wantScan = false
@@ -49,12 +47,13 @@ final class BleManager: NSObject, ObservableObject {
     private var contentSeq = 0x08
     private var contentMsg = 0x14
 
-    // Текущий показ (для прокрутки перерисовкой страницы).
-    private var showLines: [String] = []
-    private var showTop = 0
     private var showNarrow = false
     private var showColChars = 44
     private var showActive = false
+
+    /// Строк в окне показа (широкий 9 / узкий 4).
+    var windowRows: Int { showNarrow ? EvenG2Protocol.EH_NARROW_ROWS : EvenG2Protocol.EH_WIDE_ROWS }
+    var maxTop: Int { max(0, lines.count - windowRows) }
 
     override private init() {
         super.init()
@@ -86,8 +85,8 @@ final class BleManager: NSObject, ObservableObject {
         guard isReady else { return }
         showNarrow = narrow
         showColChars = colChars
-        showLines = EvenG2Protocol.wrapLines(text, lineByteLimit: colChars, center: true)
-        showTop = 0
+        lines = EvenG2Protocol.wrapLines(text, lineByteLimit: colChars, center: true)
+        top = 0
         showActive = true
         let content = windowContent()
         enqueueHub { [self] s, m in
@@ -98,9 +97,8 @@ final class BleManager: NSObject, ObservableObject {
 
     /// Прокрутка окна на delta строк (перерисовка страницы на месте).
     func scroll(_ delta: Int) {
-        guard isReady, showActive, !showLines.isEmpty else { return }
-        let maxTop = max(0, showLines.count - windowRows())
-        showTop = min(max(showTop + delta, 0), maxTop)
+        guard isReady, showActive, !lines.isEmpty else { return }
+        top = min(max(top + delta, 0), maxTop)
         let content = windowContent()
         enqueueHub { [self] s, m in
             EvenG2Protocol.buildEvenHubRebuild(s, m, content: content, colChars: showColChars,
@@ -129,27 +127,24 @@ final class BleManager: NSObject, ObservableObject {
         showActive = false
         enqueueSingle(gapMs: 250) { s, m in EvenG2Protocol.buildEvenHubShutdown(s, m) }
         enqueueSingle(gapMs: 250) { s, m in EvenG2Protocol.buildEvenHubShutdown(s, m) }
+        lines = []
+        top = 0
     }
 
     // MARK: - Показ: окно/полоса прогресса
 
-    private func windowRows() -> Int {
-        showNarrow ? EvenG2Protocol.EH_NARROW_ROWS : EvenG2Protocol.EH_WIDE_ROWS
-    }
-
     private func windowContent() -> String {
-        guard !showLines.isEmpty else { return " " }
-        let rows = windowRows()
+        guard !lines.isEmpty else { return " " }
         var window = [String]()
-        var i = showTop
-        while i < showLines.count && window.count < rows { window.append(showLines[i]); i += 1 }
-        while window.count < rows { window.append(" ") }
+        var i = top
+        while i < lines.count && window.count < windowRows { window.append(lines[i]); i += 1 }
+        while window.count < windowRows { window.append(" ") }
         return window.joined(separator: "\n")
     }
 
     private func filledRows() -> Int {
-        guard showLines.count > 0 else { return 0 }
-        let frac = Double(showTop) / Double(max(1, showLines.count))
+        guard lines.count > 0 else { return 0 }
+        let frac = Double(top) / Double(max(1, lines.count))
         return Int((frac * Double(EvenG2Protocol.EH_BAR_ROWS)).rounded())
     }
 
@@ -188,8 +183,7 @@ final class BleManager: NSObject, ObservableObject {
     private func sendNext() {
         guard !outbox.isEmpty else { draining = false; return }
         guard let p = leftPeripheral, let ch = leftWrite else { draining = false; return }
-        // write-without-response гейтится системой — ждём готовности (peripheralIsReady...).
-        guard p.canSendWriteWithoutResponse else { return }
+        guard p.canSendWriteWithoutResponse else { return }   // ждём peripheralIsReady...
         let frame = outbox.removeFirst()
         p.writeValue(Data(frame.bytes), for: ch, type: .withoutResponse)
         DispatchQueue.main.asyncAfter(deadline: .now() + Double(frame.gapMs) / 1000.0) { [weak self] in
@@ -220,12 +214,10 @@ final class BleManager: NSObject, ObservableObject {
     private func handleRx(_ v: [UInt8]) {
         guard v.count >= 11, v[0] == 0xAA else { return }
         let svcHi = Int(v[6]); let svcLo = Int(v[7])
-        if svcHi == 0x06 && svcLo == 0x01 { /* телеметрия/свайпы — Фаза 2b */ return }
-        if svcHi == 0xE0 && svcLo == 0x01 { handleHubEvent(v); return }
+        if svcHi == 0xE0 && svcLo == 0x01 { handleHubEvent(v) }
     }
 
-    /// События EvenHub-страницы (0xE0-01): свайпы/тапы по контейнеру захвата.
-    /// type: 0=одиночный тап, 1=свайп назад, 2=свайп вперёд, 3=двойной тап, 7=SYSTEM_EXIT.
+    /// События EvenHub-страницы (0xE0-01). type: 0=тап, 1=свайп назад, 2=свайп вперёд, 3=двойной, 7=SYSTEM_EXIT.
     private func handleHubEvent(_ v: [UInt8]) {
         guard v.count >= 10 else { return }
         let payload = Array(v[8..<(v.count - 2)])
@@ -257,9 +249,10 @@ final class BleManager: NSObject, ObservableObject {
             }
             i += 1
         }
+        let t = type
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            switch type {
+            switch t {
             case 0: self.events.send("tap")
             case 1: self.scroll(-1); self.events.send("prev")
             case 2: self.scroll(1); self.events.send("next")
@@ -322,7 +315,7 @@ extension BleManager: CBCentralManagerDelegate {
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
             for p in peripherals {
                 p.delegate = self
-                assignPeripheral(p)
+                if (p.name ?? "").contains("_R_") { rightPeripheral = p } else { leftPeripheral = p }
             }
         }
     }
@@ -348,11 +341,6 @@ extension BleManager: CBCentralManagerDelegate {
         if leftPeripheral != nil && rightPeripheral != nil { stopScanning() }
     }
 
-    private func assignPeripheral(_ p: CBPeripheral) {
-        let name = p.name ?? ""
-        if name.contains("_R_") { rightPeripheral = p } else { leftPeripheral = p }
-    }
-
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         setStatus("Подключение…", ready: false)
         peripheral.discoverServices(nil)
@@ -376,9 +364,7 @@ extension BleManager: CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard let services = peripheral.services else { return }
-        for service in services {
-            peripheral.discoverCharacteristics(nil, for: service)
-        }
+        for service in services { peripheral.discoverCharacteristics(nil, for: service) }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
@@ -386,14 +372,10 @@ extension BleManager: CBPeripheralDelegate {
         let isLeft = (peripheral === leftPeripheral)
         for ch in chars {
             switch ch.uuid {
-            case CHAR_WRITE:
-                if isLeft { leftWrite = ch }
-            case CHAR_NOTIFY:
-                peripheral.setNotifyValue(true, for: ch)
-            case NUS_RX:
-                peripheral.setNotifyValue(true, for: ch)
-            default:
-                break
+            case CHAR_WRITE:  if isLeft { leftWrite = ch }
+            case CHAR_NOTIFY: peripheral.setNotifyValue(true, for: ch)
+            case NUS_RX:      peripheral.setNotifyValue(true, for: ch)
+            default: break
             }
         }
     }
@@ -402,7 +384,7 @@ extension BleManager: CBPeripheralDelegate {
         guard characteristic.uuid == CHAR_NOTIFY else { return }
         if peripheral === leftPeripheral { lReady = true }
         if peripheral === rightPeripheral { rReady = true }
-        if rightPeripheral == nil { rReady = true }   // правой может не быть
+        if rightPeripheral == nil { rReady = true }
         maybeStartAuth()
     }
 
