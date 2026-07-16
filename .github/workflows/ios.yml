@@ -32,7 +32,7 @@ jobs:
         working-directory: ios
         run: xcodegen generate
 
-      - name: Build for simulator (no signing)
+      - name: Build (simulator, no signing)
         working-directory: ios
         run: |
           set -o pipefail
@@ -50,7 +50,6 @@ jobs:
         run: |
           set -e
           APP=$(find build/Build/Products -name "Whisprompt.app" -type d | head -n1)
-          echo "App path: $APP"
           DEVICE=$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ {print $2; exit}')
           echo "Simulator UDID: $DEVICE"
           xcrun simctl boot "$DEVICE" || true
@@ -61,10 +60,36 @@ jobs:
           xcrun simctl io "$DEVICE" screenshot ios-screenshot.png || xcrun simctl io booted screenshot ios-screenshot.png
           xcrun simctl shutdown "$DEVICE" || true
 
+      - name: Build unsigned device IPA (for sideloading)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Whisprompt.xcodeproj \
+            -scheme Whisprompt \
+            -sdk iphoneos \
+            -configuration Debug \
+            -derivedDataPath build-device \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+          APP=$(find build-device/Build/Products -name "Whisprompt.app" -type d | head -n1)
+          echo "Device app: $APP"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qr Whisprompt-unsigned.ipa Payload
+          ls -la Whisprompt-unsigned.ipa
+
       - name: Upload screenshot
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: simulator-screenshot
           path: ios/ios-screenshot.png
+          if-no-files-found: warn
+
+      - name: Upload unsigned IPA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Whisprompt-unsigned-ipa
+          path: ios/Whisprompt-unsigned.ipa
           if-no-files-found: warn
