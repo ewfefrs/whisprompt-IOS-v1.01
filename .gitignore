@@ -1,0 +1,17 @@
+# НИКОГДА не коммитить секреты и артефакты сборки
+*.jks
+*.keystore
+keystore.properties
+*token*.txt
+*_private*.pem
+*_private*.txt
+license_private*.txt
+
+# Xcode / XcodeGen (генерируется)
+**/Whisprompt.xcodeproj/
+**/Info.plist
+DerivedData/
+build/
+*.ipa
+.DS_Store
+xcuserdata/
