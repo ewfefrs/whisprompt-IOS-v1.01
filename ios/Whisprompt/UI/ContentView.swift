@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var keyInput = ""
     @State private var premium = PremiumManager.isPremium()
     @State private var toast: String?
+    @ObservedObject private var ble = BleManager.shared
 
     private var deviceId: String { LicenseManager.deviceId() }
 
@@ -19,11 +20,13 @@ struct ContentView: View {
 
                     statusCard
 
+                    glassesCard
+
                     deviceCard
 
                     activateCard
 
-                    Text("Экран телесуфлёра и подключение к очкам G2 (CoreBluetooth) — в следующей сборке.")
+                    Text("Экран телесуфлёра (превью, авто-скролл) — в следующих сборках. Подключение к G2 и показ текста — экспериментально, проверяется на реальном iPhone.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                         .padding(.top, 4)
@@ -55,6 +58,34 @@ struct ContentView: View {
             Text(premium ? "Премиум активен" : "Бесплатная версия")
                 .fontWeight(.semibold)
             Spacer()
+        }
+        .padding()
+        .background(Color.secondary.opacity(0.1))
+        .cornerRadius(12)
+    }
+
+    private var glassesCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Очки G2").font(.headline)
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(ble.isReady ? Color.green : (ble.isScanning ? Color.orange : Color.gray))
+                    .frame(width: 10, height: 10)
+                Text(ble.status).font(.subheadline).foregroundColor(.secondary)
+                Spacer()
+            }
+            HStack {
+                Button(ble.isScanning || ble.isReady ? "Отключить" : "Подключить") {
+                    if ble.isScanning || ble.isReady { ble.disconnect() } else { ble.connect() }
+                }
+                .buttonStyle(.bordered)
+                Button("Тест текста") {
+                    ble.showText("Whisprompt на очках.\nТестовый текст телесуфлёра для проверки подключения к G2.",
+                                 narrow: false)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!ble.isReady)
+            }
         }
         .padding()
         .background(Color.secondary.opacity(0.1))
